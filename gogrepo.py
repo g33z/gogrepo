@@ -1,156 +1,44 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from __future__ import print_function
-from __future__ import division
-from __future__ import unicode_literals
+# originally this program was written by eddie3, g33z has translated it from python2 to python3
 
 __appname__ = 'gogrepo.py'
-__author__ = 'eddie3'
-__version__ = '0.3a'
-__url__ = 'https://github.com/eddie3/gogrepo'
+__author__ = 'g33z'
+__version__ = '1.0'
+__url__ = 'https://git.nrdblg.de/g33z/gogrepo'
 
-# imports
-import os
-import sys
-import threading
-import logging
-import contextlib
-import json
-import html5lib
-import pprint
-import time
-import zipfile
-import hashlib
-import getpass
 import argparse
 import codecs
-import io
+import contextlib
 import datetime
+import hashlib
+import http.cookiejar as cookiejar
+import json
+# imports
+import os
+import pprint
 import shutil
 import socket
+import sys
+import threading
+import time
 import xml.etree.ElementTree
+import zipfile
+from http.client import BadStatusLine
+from io import StringIO
+from itertools import zip_longest
+from queue import Queue
+from urllib.parse import urlparse, urlencode, unquote
+from urllib.request import HTTPCookieProcessor, HTTPError, URLError, build_opener, Request
 
-# python 2 / 3 imports
-try:
-    # python 2
-    from Queue import Queue
-    import cookielib as cookiejar
-    from httplib import BadStatusLine
-    from urlparse import urlparse
-    from urllib import urlencode, unquote
-    from urllib2 import HTTPError, URLError, HTTPCookieProcessor, build_opener, Request
-    from itertools import izip_longest as zip_longest
-    from StringIO import StringIO
-except ImportError:
-    # python 3
-    from queue import Queue
-    import http.cookiejar as cookiejar
-    from http.client import BadStatusLine
-    from urllib.parse import urlparse, urlencode, unquote
-    from urllib.request import HTTPCookieProcessor, HTTPError, URLError, build_opener, Request
-    from itertools import zip_longest
-    from io import StringIO
-
-# python 2 / 3 renames
-try: input = raw_input
-except NameError: pass
+from login import Login
 
 # optional imports
 try:
     from html2text import html2text
 except ImportError:
-    def html2text(x): return x
-
-# lib mods
-cookiejar.MozillaCookieJar.magic_re = r'.*'  # bypass the hardcoded "Netscape HTTP Cookie File" check
-
-# configure logging
-logFormatter = logging.Formatter("%(asctime)s | %(message)s", datefmt='%H:%M:%S')
-rootLogger = logging.getLogger('ws')
-rootLogger.setLevel(logging.DEBUG)
-consoleHandler = logging.StreamHandler(sys.stdout)
-consoleHandler.setFormatter(logFormatter)
-rootLogger.addHandler(consoleHandler)
-
-# logging aliases
-info = rootLogger.info
-warn = rootLogger.warning
-debug = rootLogger.debug
-error = rootLogger.error
-log_exception = rootLogger.exception
-
-# filepath constants
-GAME_STORAGE_DIR = r'.'
-COOKIES_FILENAME = r'gog-cookies.dat'
-MANIFEST_FILENAME = r'gog-manifest.dat'
-SERIAL_FILENAME = r'!serial.txt'
-INFO_FILENAME = r'!info.txt'
-
-# global web utilities
-global_cookies = cookiejar.LWPCookieJar(COOKIES_FILENAME)
-cookieproc = HTTPCookieProcessor(global_cookies)
-opener = build_opener(cookieproc)
-treebuilder = html5lib.treebuilders.getTreeBuilder('etree')
-parser = html5lib.HTMLParser(tree=treebuilder, namespaceHTMLElements=False)
-
-# GOG URLs
-GOG_HOME_URL = r'https://www.gog.com'
-GOG_ACCOUNT_URL = r'https://www.gog.com/account'
-GOG_LOGIN_URL = r'https://login.gog.com/login_check'
-
-# GOG Constants
-GOG_MEDIA_TYPE_GAME  = '1'
-GOG_MEDIA_TYPE_MOVIE = '2'
-
-# HTTP request settings
-HTTP_FETCH_DELAY = 1   # in seconds
-HTTP_RETRY_DELAY = 5   # in seconds
-HTTP_RETRY_COUNT = 3
-HTTP_GAME_DOWNLOADER_THREADS = 4
-HTTP_PERM_ERRORCODES = (404, 403, 503)
-
-# Save manifest data for these os and lang combinations
-DEFAULT_OS_LIST = ['windows']
-DEFAULT_LANG_LIST = ['en']
-
-# These file types don't have md5 data from GOG
-SKIP_MD5_FILE_EXT = ['.txt', '.zip']
-
-# Language table that maps two letter language to their unicode gogapi json name
-LANG_TABLE = {'en': u'English',   # English
-              'bl': u'\u0431\u044a\u043b\u0433\u0430\u0440\u0441\u043a\u0438',  # Bulgarian
-              'ru': u'\u0440\u0443\u0441\u0441\u043a\u0438\u0439',              # Russian
-              'gk': u'\u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac',        # Greek
-              'sb': u'\u0421\u0440\u043f\u0441\u043a\u0430',                    # Serbian
-              'ar': u'\u0627\u0644\u0639\u0631\u0628\u064a\u0629',              # Arabic
-              'br': u'Portugu\xeas do Brasil',  # Brazilian Portuguese
-              'jp': u'\u65e5\u672c\u8a9e',      # Japanese
-              'ko': u'\ud55c\uad6d\uc5b4',      # Korean
-              'fr': u'fran\xe7ais',             # French
-              'cn': u'\u4e2d\u6587',            # Chinese
-              'cz': u'\u010desk\xfd',           # Czech
-              'hu': u'magyar',                  # Hungarian
-              'pt': u'portugu\xeas',            # Portuguese
-              'tr': u'T\xfcrk\xe7e',            # Turkish
-              'sk': u'slovensk\xfd',            # Slovak
-              'nl': u'nederlands',              # Dutch
-              'ro': u'rom\xe2n\u0103',          # Romanian
-              'es': u'espa\xf1ol',      # Spanish
-              'pl': u'polski',          # Polish
-              'it': u'italiano',        # Italian
-              'de': u'Deutsch',         # German
-              'da': u'Dansk',           # Danish
-              'sv': u'svenska',         # Swedish
-              'fi': u'Suomi',           # Finnish
-              'no': u'norsk',           # Norsk
-              }
-
-VALID_OS_TYPES = ['windows', 'linux', 'mac']
-VALID_LANG_TYPES = list(LANG_TABLE.keys())
-
-ORPHAN_DIR_NAME = '!orphaned'
-ORPHAN_DIR_EXCLUDE_LIST = [ORPHAN_DIR_NAME, '!misc']
-ORPHAN_FILE_EXCLUDE_LIST = [INFO_FILENAME, SERIAL_FILENAME]
+    def html2text(x):
+        return x
 
 def request(url, args=None, byte_range=None, retries=HTTP_RETRY_COUNT, delay=HTTP_FETCH_DELAY):
     """Performs web request to url with optional retries, delay, and byte range.
@@ -161,7 +49,7 @@ def request(url, args=None, byte_range=None, retries=HTTP_RETRY_COUNT, delay=HTT
     try:
         if args is not None:
             enc_args = urlencode(args)
-            enc_args = enc_args.encode('ascii') # needed for Python 3
+            enc_args = enc_args.encode('ascii')  # needed for Python 3
         else:
             enc_args = None
         req = Request(url, data=enc_args)
@@ -180,7 +68,7 @@ def request(url, args=None, byte_range=None, retries=HTTP_RETRY_COUNT, delay=HTT
 
         if _retry:
             warn('request failed: %s (%d retries left) -- will retry in %ds...' % (e, retries, HTTP_RETRY_DELAY))
-            return request(url=url, args=args, byte_range=byte_range, retries=retries-1, delay=HTTP_RETRY_DELAY)
+            return request(url=url, args=args, byte_range=byte_range, retries=retries - 1, delay=HTTP_RETRY_DELAY)
 
     return contextlib.closing(page)
 
@@ -197,6 +85,7 @@ class AttrDict(dict):
 
     def __setattr__(self, key, val):
         self[key] = val
+
 
 class ConditionalWriter(object):
     """File writer that only updates file on disk if contents chanaged"""
@@ -227,6 +116,7 @@ class ConditionalWriter(object):
                 with codecs.open(self._filename, 'w', 'utf-8') as overwrite:
                     tmp.seek(0)
                     shutil.copyfileobj(tmp, overwrite)
+
 
 def load_cookies():
     # try to load as default lwp format
@@ -268,7 +158,7 @@ def save_manifest(items):
         pprint.pprint(items, width=123, stream=w)
 
 
-def open_notrunc(name, bufsize=4*1024):
+def open_notrunc(name, bufsize=4 * 1024):
     flags = os.O_WRONLY | os.O_CREAT
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY  # windows
@@ -512,86 +402,6 @@ def process_argv(argv):
     return args
 
 
-# --------
-# Commands
-# --------
-def cmd_login(user, passwd):
-    """Attempts to log into GOG and saves the resulting cookiejar to disk.
-    """
-    login_data = {'user': user,
-                  'passwd': passwd,
-                  'auth_url': None,
-                  'login_token': None,
-                  'two_step_url': None,
-                  'two_step_token': None,
-                  'two_step_security_code': None,
-                  'login_success': False,
-                  }
-
-    global_cookies.clear()  # reset cookiejar
-
-    # prompt for login/password if needed
-    if login_data['user'] is None:
-        login_data['user'] = input("Username: ")
-    if login_data['passwd'] is None:
-        login_data['passwd'] = getpass.getpass()
-
-    info("attempting gog login as '{}' ...".format(login_data['user']))
-
-    # fetch the auth url
-    with request(GOG_HOME_URL, delay=0) as page:
-        etree = html5lib.parse(page, namespaceHTMLElements=False)
-        for elm in etree.findall('.//script'):
-            if elm.text is not None and 'GalaxyAccounts' in elm.text:
-                login_data['auth_url'] = elm.text.split("'")[3]
-                break
-
-    # fetch the login token
-    with request(login_data['auth_url'], delay=0) as page:
-        etree = html5lib.parse(page, namespaceHTMLElements=False)
-        for elm in etree.findall('.//input'):
-            if elm.attrib['id'] == 'login__token':
-                login_data['login_token'] = elm.attrib['value']
-                break
-
-    # perform login and capture two-step token if required
-    with request(GOG_LOGIN_URL, delay=0, args={'login[username]': login_data['user'],
-                                               'login[password]': login_data['passwd'],
-                                               'login[login]': '',
-                                               'login[_token]': login_data['login_token']}) as page:
-        etree = html5lib.parse(page, namespaceHTMLElements=False)
-        if 'two_step' in page.geturl():
-            login_data['two_step_url'] = page.geturl()
-            for elm in etree.findall('.//input'):
-                if elm.attrib['id'] == 'second_step_authentication__token':
-                    login_data['two_step_token'] = elm.attrib['value']
-                    break
-        elif 'on_login_success' in page.geturl():
-            login_data['login_success'] = True
-
-    # perform two-step if needed
-    if login_data['two_step_url'] is not None:
-        login_data['two_step_security_code'] = input("enter two-step security code: ")
-
-        # Send the security code back to GOG
-        with request(login_data['two_step_url'], delay=0,
-                     args={'second_step_authentication[token][letter_1]': login_data['two_step_security_code'][0],
-                           'second_step_authentication[token][letter_2]': login_data['two_step_security_code'][1],
-                           'second_step_authentication[token][letter_3]': login_data['two_step_security_code'][2],
-                           'second_step_authentication[token][letter_4]': login_data['two_step_security_code'][3],
-                           'second_step_authentication[send]': "",
-                           'second_step_authentication[_token]': login_data['two_step_token']}) as page:
-            if 'on_login_success' in page.geturl():
-                login_data['login_success'] = True
-
-    # save cookies on success
-    if login_data['login_success']:
-        info('login successful!')
-        global_cookies.save()
-    else:
-        error('login failed, verify your username/password and try again.')
-
-
 def cmd_update(os_list, lang_list, skipknown, updateonly, id):
     media_type = GOG_MEDIA_TYPE_GAME
     items = []
@@ -602,7 +412,7 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, id):
 
     gamesdb = load_manifest()
 
-    api_url  = GOG_ACCOUNT_URL
+    api_url = GOG_ACCOUNT_URL
     api_url += "/getFilteredProducts"
 
     # Make convenient list of known ids
@@ -680,12 +490,12 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, id):
     items_count = len(items)
     print_padding = len(str(items_count))
     if not id and not updateonly and not skipknown:
-        info('found %d games !!%s' % (items_count, '!'*int(items_count/100)))  # teehee
+        info('found %d games !!%s' % (items_count, '!' * int(items_count / 100)))  # teehee
 
     # fetch item details
     i = 0
     for item in sorted(items, key=lambda item: item.title):
-        api_url  = GOG_ACCOUNT_URL
+        api_url = GOG_ACCOUNT_URL
         api_url += "/gameDetails/{}.json".format(item.id)
 
         i += 1
@@ -778,9 +588,10 @@ def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id):
 
     # util
     def megs(b):
-        return '%.1fMB' % (b / float(1024**2))
+        return '%.1fMB' % (b / float(1024 ** 2))
+
     def gigs(b):
-        return '%.2fGB' % (b / float(1024**3))
+        return '%.2fGB' % (b / float(1024 ** 3))
 
     if id:
         id_found = False
@@ -815,40 +626,40 @@ def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id):
         # Generate and save a game info text file
         if not dryrun:
             with ConditionalWriter(os.path.join(item_homedir, INFO_FILENAME)) as fd_info:
-                fd_info.write(u'{0}-- {1} --{0}{0}'.format(os.linesep, item.long_title))
-                fd_info.write(u'title.......... {}{}'.format(item.title, os.linesep))
+                fd_info.write('{0}-- {1} --{0}{0}'.format(os.linesep, item.long_title))
+                fd_info.write('title.......... {}{}'.format(item.title, os.linesep))
                 if item.genre:
-                    fd_info.write(u'genre.......... {}{}'.format(item.genre, os.linesep))
-                fd_info.write(u'game id........ {}{}'.format(item.id, os.linesep))
-                fd_info.write(u'url............ {}{}'.format(GOG_HOME_URL + item.store_url, os.linesep))
+                    fd_info.write('genre.......... {}{}'.format(item.genre, os.linesep))
+                fd_info.write('game id........ {}{}'.format(item.id, os.linesep))
+                fd_info.write('url............ {}{}'.format(GOG_HOME_URL + item.store_url, os.linesep))
                 if item.rating > 0:
-                    fd_info.write(u'user rating.... {}%{}'.format(item.rating * 2, os.linesep))
+                    fd_info.write('user rating.... {}%{}'.format(item.rating * 2, os.linesep))
                 if item.release_timestamp > 0:
                     rel_date = datetime.datetime.fromtimestamp(item.release_timestamp).strftime('%B %d, %Y')
-                    fd_info.write(u'release date... {}{}'.format(rel_date, os.linesep))
+                    fd_info.write('release date... {}{}'.format(rel_date, os.linesep))
                 if hasattr(item, 'gog_messages') and item.gog_messages:
-                    fd_info.write(u'{0}gog messages...:{0}'.format(os.linesep))
+                    fd_info.write('{0}gog messages...:{0}'.format(os.linesep))
                     for gog_msg in item.gog_messages:
-                        fd_info.write(u'{0}{1}{0}'.format(os.linesep, html2text(gog_msg).strip()))
-                fd_info.write(u'{0}game items.....:{0}{0}'.format(os.linesep))
+                        fd_info.write('{0}{1}{0}'.format(os.linesep, html2text(gog_msg).strip()))
+                fd_info.write('{0}game items.....:{0}{0}'.format(os.linesep))
                 for game_item in item.downloads:
-                    fd_info.write(u'    [{}] -- {}{}'.format(game_item.name, game_item.desc, os.linesep))
+                    fd_info.write('    [{}] -- {}{}'.format(game_item.name, game_item.desc, os.linesep))
                     if game_item.version:
-                        fd_info.write(u'        version: {}{}'.format(game_item.version, os.linesep))
+                        fd_info.write('        version: {}{}'.format(game_item.version, os.linesep))
                 if len(item.extras) > 0:
-                    fd_info.write(u'{0}extras.........:{0}{0}'.format(os.linesep))
+                    fd_info.write('{0}extras.........:{0}{0}'.format(os.linesep))
                     for game_item in item.extras:
-                        fd_info.write(u'    [{}] -- {}{}'.format(game_item.name, game_item.desc, os.linesep))
+                        fd_info.write('    [{}] -- {}{}'.format(game_item.name, game_item.desc, os.linesep))
                 if item.changelog:
-                    fd_info.write(u'{0}changelog......:{0}{0}'.format(os.linesep))
+                    fd_info.write('{0}changelog......:{0}{0}'.format(os.linesep))
                     fd_info.write(html2text(item.changelog).strip())
                     fd_info.write(os.linesep)
         # Generate and save a game serial text file
         if not dryrun:
             if item.serial != '':
                 with ConditionalWriter(os.path.join(item_homedir, SERIAL_FILENAME)) as fd_serial:
-                    item.serial = item.serial.replace(u'<span>', '')
-                    item.serial = item.serial.replace(u'</span>', os.linesep)
+                    item.serial = item.serial.replace('<span>', '')
+                    item.serial = item.serial.replace('</span>', os.linesep)
                     fd_serial.write(item.serial)
 
         # Populate queue with all files to be downloaded
@@ -870,7 +681,7 @@ def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id):
             info('     download   %s' % game_item.name)
             sizes[dest_file] = game_item.size
 
-            work_dict[dest_file] = (game_item.href, game_item.size, 0, game_item.size-1, dest_file)
+            work_dict[dest_file] = (game_item.href, game_item.size, 0, game_item.size - 1, dest_file)
 
     for work_item in work_dict:
         work.put(work_dict[work_item])
@@ -879,13 +690,13 @@ def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id):
         info("{} left to download".format(gigs(sum(sizes.values()))))
         return  # bail, as below just kicks off the actual downloading
 
-    info('-'*60)
+    info('-' * 60)
 
     # work item I/O loop
     def ioloop(tid, path, page, out):
         sz, t0 = True, time.time()
         while sz:
-            buf = page.read(4*1024)
+            buf = page.read(4 * 1024)
             t = time.time()
             out.write(buf)
             sz, dt, t0 = len(buf), t - t0, t
@@ -903,7 +714,8 @@ def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id):
                 with lock:
                     if not os.path.isdir(dest_dir):
                         os.makedirs(dest_dir)
-                    if os.path.exists(path) and os.path.getsize(path) > sz:  # if needed, truncate file if ours is larger than expected size
+                    if os.path.exists(path) and os.path.getsize(
+                            path) > sz:  # if needed, truncate file if ours is larger than expected size
                         with open_notrunc(path) as f:
                             f.truncate(sz)
                 with open_notrunc(path) as out:
@@ -938,9 +750,10 @@ def cmd_download(savedir, skipextras, skipgames, skipids, dryrun, id):
                 for tid, (sz, t) in flowrates:
                     szs, ts = flows.get(tid, (0, 0))
                     flows[tid] = sz + szs, t + ts
-                bps = sum(szs/ts for szs, ts in list(flows.values()) if ts > 0)
+                bps = sum(szs / ts for szs, ts in list(flows.values()) if ts > 0)
                 info('%10s %8.1fMB/s %2dx  %s' % \
-                    (megs(sizes[path]), bps / 1024.0**2, len(flows), "%s/%s" % (os.path.basename(os.path.split(path)[0]), os.path.split(path)[1])))
+                     (megs(sizes[path]), bps / 1024.0 ** 2, len(flows),
+                      "%s/%s" % (os.path.basename(os.path.split(path)[0]), os.path.split(path)[1])))
             if len(rates) != 0:  # only update if there's change
                 info('%s remaining' % gigs(left))
             rates.clear()
@@ -1133,9 +946,10 @@ def cmd_clean(cleandir, dryrun):
 
 def main(args):
     stime = datetime.datetime.now()
+    arguments = args
 
     if args.cmd == 'login':
-        cmd_login(args.username, args.password)
+        Login(args.username, args.password).cmd_login()
         return  # no need to see time stats
     elif args.cmd == 'update':
         cmd_update(args.os, args.lang, args.skipknown, args.updateonly, args.id)
